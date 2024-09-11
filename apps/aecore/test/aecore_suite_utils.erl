@@ -33,8 +33,8 @@
          get_node_db_config/1,
          delete_node_db_if_persisted/1,
          expected_mine_rate/0,
-         hc_mine_blocks/2,
-         hc_mine_blocks/3,
+         hc_mine_blocks/2, hc_mine_blocks_allow_offline/2,
+         hc_mine_blocks/3, hc_mine_blocks_allow_offline/3,
          mine_blocks/2,
          mine_blocks/3,
          mine_blocks/4,
@@ -690,6 +690,9 @@ mine_blocks(Node, NumBlocksToMine, MiningRate, Opts) ->
 hc_mine_blocks(Nodes, NumBlocksToMine) ->
     hc_mine_blocks(Nodes, NumBlocksToMine, #{}).
 
+hc_mine_blocks_allow_offline(Nodes, NumBlocksToMine) ->
+    hc_mine_blocks_allow_offline(Nodes, NumBlocksToMine, #{}).
+
 mine_blocks(Node, NumBlocksToMine, MiningRate, Type, Opts) ->
     case rpc_test_consensus_enabled(Node)
         orelse rpc_on_demand_consensus_enabled(Node) of
@@ -1049,6 +1052,9 @@ connect_await_mode(N) ->
 
 subscribe(N, Event) ->
     call_proxy(N, {subscribe, Event}).
+
+subscribe_allow_offline(N, Event) ->
+    call_proxy_allow_offline(N, {subscribe, Event}).
 
 unsubscribe(N, Event) ->
     ok = call_proxy(N, {unsubscribe, Event}),
@@ -1729,6 +1735,31 @@ proxy_loop(Subs, Events) ->
             proxy_loop(Subs, Events)
     end.
 
+%% Similar to call_proxy, but allows for offline nodes and will not throw, returning {error, _}
+call_proxy_allow_offline(N, Req) ->
+    call_proxy_allow_offline(N, Req, ?PROXY_CALL_RETRIES, 3000).
+
+call_proxy_allow_offline(N, Req, Tries, Timeout) when Tries > 0 ->
+    Ref = erlang:monitor(process, {?PROXY, N}),
+    {?PROXY, N} ! {self(), Ref, Req},
+    receive
+        {'DOWN', Ref, _, _, noproc} ->
+            ct:log("proxy not yet there, retrying in 0.1 sec...", []),
+            receive
+            after 100 ->
+                    call_proxy(N, Req, Tries-1, Timeout)
+            end;
+        {'DOWN', Ref, _, _, Reason} ->
+            {error, {proxy_died, N, Reason}};
+        {Ref, Result} ->
+            erlang:demonitor(Ref),
+            Result
+    after Timeout ->
+            {error, proxy_call_timeout}
+    end;
+call_proxy_allow_offline(N, _, _, _) ->
+    {error, {proxy_not_running, N}}.
+
 call_proxy(N, Req) ->
     call_proxy(N, Req, ?PROXY_CALL_RETRIES, 3000).
 
@@ -1970,9 +2001,20 @@ get_key_hash_by_delta(Node, Delta) ->
 assert_stopped(Node) ->
     stopped = rpc:call(Node, aec_conductor, get_mining_state, [], 5000).
 
+assert_stopped_allow_offline(Node) ->
+    case rpc:call(Node, aec_conductor, get_mining_state, [], 5000) of
+        stopped -> true;
+        {badrpc, nodedown} -> true;
+        Other -> Other
+    end.
+
 subscribe_created(Node) ->
     ok = subscribe(Node, block_created),
     ok = subscribe(Node, micro_block_created).
+
+subscribe_created_allow_offline(Node) ->
+    ok = subscribe_allow_offline(Node, block_created),
+    ok = subscribe_allow_offline(Node, micro_block_created).
 
 start_mining(Node, Opts) ->
     StartRes = rpc:call(Node, aec_conductor, start_mining, [Opts], 5000),
@@ -1992,6 +2034,31 @@ hc_mine_blocks(Nodes, NBlocks, Opts) ->
     _ = flush_new_blocks(), %% Flush old messages
 
     [ subscribe_created(Node) || Node <- Nodes ],
+    [ start_mining(Node, Opts) || Node <- Nodes ],
+
+    Res = hc_loop_mine_blocks(Nodes, NBlocks),
+
+    [ stop_mining(Node) || Node <- Nodes ],
+    [ unsubscribe_created(Node) || Node <- Nodes ],
+
+    [ assert_stopped(Node) || Node <- Nodes ],
+
+    _ = flush_new_blocks(), %% Flush late messages
+
+    case Res of
+        {ok, BlocksReverse} ->
+            {ok, lists:reverse(BlocksReverse)};
+        {error, Reason} ->
+            erlang:error(Reason)
+    end.
+
+%% Same as hc_mine_blocks/3 but allows nodes to be offline and doesn't create a panic
+hc_mine_blocks_allow_offline(Nodes, NBlocks, Opts) ->
+    [ assert_stopped_allow_offline(Node) || Node <- Nodes ],
+
+    _ = flush_new_blocks(), %% Flush old messages
+
+    [ subscribe_created_allow_offline(Node) || Node <- Nodes ],
     [ start_mining(Node, Opts) || Node <- Nodes ],
 
     Res = hc_loop_mine_blocks(Nodes, NBlocks),

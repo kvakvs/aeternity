@@ -27,7 +27,8 @@
          verify_fees/1,
          elected_leader_did_not_show_up/1,
          block_difficulty/1,
-         epoch_with_slow_parent/1
+         epoch_with_slow_parent/1,
+         consensus_fork_0/1
         ]).
 
 -include_lib("stdlib/include/assert.hrl").
@@ -130,7 +131,7 @@
 
 -define(GENESIS_BENFICIARY, <<0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0>>).
 
-all() -> [{group, hc}, {group, epochs}].
+all() -> [{group, hc}, {group, epochs}, {group, hc_consensus}].
 
 groups() ->
     [
@@ -146,6 +147,9 @@ groups() ->
     , {epochs, [sequence],
           [ start_two_child_nodes
           , epoch_with_slow_parent ]}
+    , {hc_consensus, [sequence],
+          [ start_two_child_nodes
+          , consensus_fork_0 ]}
     ].
 
 suite() -> [].
@@ -216,6 +220,10 @@ end_per_suite(Config) ->
                proplists:get_value(started_apps, Config, []))],
     ok.
 
+% init_per_group(hc_consensus, Config0) ->
+%     %% Flag for the mining helpers to allow some nodes being offline and not cause a crash. Default false.
+%     [{rpc_allow_offline, true} |
+%         init_per_group('_', Config0)];
 init_per_group(_, Config0) ->
     VM = fate,
     NetworkId = <<"hc">>,
@@ -461,6 +469,21 @@ simple_withdraw(Config) ->
             (Producer == pubkey(?ALICE) andalso AliceContractSPower + KeyReward - 1000 == AliceContractSPower1)),
     ok.
 
+    %% What on earth are we testing here??
+inspect(Node) ->
+    ct:log("~p point of view:", [Node]),
+    {ok, TopH} = aec_headers:hash_header(rpc(Node, aec_chain, top_header, [])),
+    ct:log("     top hash ~p", [TopH]),
+    ChainEnds = rpc(Node, aec_db, find_chain_end_hashes, []),
+    lists:foreach(
+        fun(Hash) ->
+            {value, D} = rpc(Node, aec_db, find_block_difficulty, [Hash]),
+            {value, H} = rpc(Node, aec_db, dirty_find_header, [Hash]),
+            ct:log("     Chain end with ~p has difficulty ~p", [H, D]),
+            ok
+        end,
+        ChainEnds).
+
 set_up_third_node(Config) ->
     {Node3, NodeName, Stakers} = lists:keyfind(?NODE3, 1, ?config(nodes, Config)),
     Nodes = [ Node || {Node, _, _} <- ?config(nodes, Config)],
@@ -476,28 +499,8 @@ set_up_third_node(Config) ->
     ct:log("Verified peers ~p", [Node3VerifiedPeers]),
     {ok, _} = wait_same_top(Nodes),
     %% What on earth are we testing here??
-    Inspect =
-        fun(Node) ->
-            {ok, TopH} = aec_headers:hash_header(rpc(Node, aec_chain, top_header, [])),
-            ct:log("     top hash ~p", [TopH]),
-            ChainEnds = rpc(Node, aec_db, find_chain_end_hashes, []),
-            lists:foreach(
-                fun(Hash) ->
-                    {value, D} = rpc(Node, aec_db, find_block_difficulty, [Hash]),
-                    {value, H} = rpc(Node, aec_db, dirty_find_header, [Hash]),
-                    ct:log("     Chain end with ~p has difficulty ~p", [H, D]),
-                    ok
-                end,
-                ChainEnds)
-        end,
-    ct:log("Node1 point of view:", []),
-    Inspect(?NODE1),
-    ct:log("Node2 point of view:", []),
-    Inspect(?NODE2),
-    ct:log("Node3 point of view:", []),
-    Inspect(?NODE3),
+    lists:foreach(fun inspect/1, Nodes),
     ok.
-
 
 sync_third_node(Config) ->
     set_up_third_node(Config).
@@ -1056,16 +1059,26 @@ produce_cc_blocks(Config, BlocksCnt, ParentProduce) ->
     %% assert that the parent chain is not mining
     ?assertEqual(stopped, rpc:call(?PARENT_CHAIN_NODE_NAME, aec_conductor, get_mining_state, [])),
     NewTopHeight = produce_to_cc_height(Config, TopHeight + BlocksCnt, ParentProduce),
-    wait_same_top([ Node || {Node, _, _} <- ?config(nodes, Config)]),
+    Nodes = [ Node || {Node, Name, _} <- ?config(nodes, Config), 
+        not lists:member(Name, offline_node_names(Config)) ],
+    wait_same_top(Nodes),
     get_generations(Node1, TopHeight + 1, NewTopHeight).
 
+offline_node_names(Config) ->
+    case ?config(offline_node_names, Config) of
+        undefined -> [];
+        Off -> Off
+    end.
+
 %% It seems we automatically produce child chain blocks in the background
+%% Set 'offline_node_names' in config, to skip nodes which we've brought down for a test
 produce_to_cc_height(Config, GoalHeight, ParentProduce) ->
     [{Node, NodeName, _} | _] = ?config(nodes, Config),
-    NodeNames = [ Name || {_, Name, _} <- ?config(nodes, Config) ],
+    NodeNames = [ Name || {_, Name, _} <- ?config(nodes, Config), 
+        not lists:member(Name, offline_node_names(Config)) ],
     TopHeight = rpc(Node, aec_chain, top_height, []),
     case TopHeight >= GoalHeight of
-      true ->
+      true -> 
           TopHeight;
       false ->
           case is_integer(ParentProduce) andalso
@@ -1076,11 +1089,11 @@ produce_to_cc_height(Config, GoalHeight, ParentProduce) ->
           KeyBlock =
               case rpc:call(NodeName, aec_tx_pool, peek, [infinity]) of
                   {ok, []} ->
-                       {ok, [{N, Block}]} = mine_cc_blocks(NodeNames, 1),
+                       {ok, [{N, Block}]} = aecore_suite_utils:hc_mine_blocks(NodeNames, 1),
                        ct:log("CC ~p mined block: ~p", [N, Block]),
                        Block;
                   {ok, _Txs} ->
-                       {ok, [{N1, KB}, {N2, MB}]} = mine_cc_blocks(NodeNames, 2),
+                       {ok, [{N1, KB}, {N2, MB}]} = aecore_suite_utils:hc_mine_blocks(NodeNames, 2),
                        ?assertEqual(key, aec_blocks:type(KB)),
                        ?assertEqual(micro, aec_blocks:type(MB)),
                        ct:log("CC ~p mined block: ~p", [N1, KB]),
@@ -1091,9 +1104,6 @@ produce_to_cc_height(Config, GoalHeight, ParentProduce) ->
           ct:log("~p produced CC block at height ~p", [Producer, aec_blocks:height(KeyBlock)]),
           produce_to_cc_height(Config, GoalHeight, ParentProduce)
     end.
-
-mine_cc_blocks(NodeNames, N) ->
-    aecore_suite_utils:hc_mine_blocks(NodeNames, N).
 
 get_generations(Node, FromHeight, ToHeight) ->
     ReversedBlocks =
@@ -1157,3 +1167,96 @@ create_stub(ContractFile, Opts) ->
     {ok, Enc}  = aeso_aci:contract_interface(json, ContractFile, Opts ++ [{no_code, true}]),
     {ok, Stub} = aeso_aci:render_aci_json(Enc),
     binary_to_list(Stub).
+
+
+%% TODO: Fork at microblock 1 by node 1 never mining
+%% TODO: Fork at microblock 2 by node 1 mining late
+%% TODO: Fork at microblock 2 by node 1 never mining
+%% TODO: Isolate nodes and make them produce independently
+%% TODO: Break a producer and observe how it unstucks itself
+%% Malicious block?
+
+%% Mine a key block.
+%% Fork at microblock 0 by leader 1 never mining.
+%% Verify that the fork is resolved.
+%%              leader 1: x      leader 1: [Tx1, Tx2]
+%% KeyBlock ->  leader 2: [ø] -> leader 2: [Tx2]
+%%              leader 3: [ø]    leader 3: [Tx2]
+consensus_fork_0(Config) ->
+    NetworkId = ?config(network_id, Config),
+    Nodes = [Node || {Node, _, _} <- ?config(nodes, Config)],
+
+    %% Mine a key block
+    %% {ok, _KBs} = aecore_suite_utils:mine_key_blocks(?NODE1_NAME, 1),
+
+    %% Get initial height, assume there will be 3 leaders for 3 nodes
+    % InitialHeight = aec_blocks:height(KB),
+    %% [L1, L2, L3] = leaders_at_height(?NODE1, InitialHeight, Config),
+    %% TODO: Get a producer list  (contract call)
+
+    {ok, []} = rpc:call(?NODE1_NAME, aec_tx_pool, peek, [infinity]),
+    % {ok, _} = aecore_suite_utils:mine_micro_block_emptying_mempool_or_fail(?NODE2_NAME),
+    seed_account(pubkey(?ALICE), 100_001 * ?DEFAULT_GAS_PRICE, NetworkId),
+    {ok, Blocks1} = produce_cc_blocks(Config, 1),
+    ct:log("CC blocks #1: ~p", [Blocks1]),
+
+    %% Node1 is being used for seeding, stop Node2 and mine 3 blocks
+    stop_and_check([?NODE2], Config),
+    ConfigWithoutNode2 = [{offline_node_names, [?NODE2_NAME]} | Config],
+    seed_account(pubkey(?ALICE), 200_001 * ?DEFAULT_GAS_PRICE, NetworkId),
+    ct:log("Config without Node2: ~p", [ConfigWithoutNode2]),
+    {ok, Blocks2} = produce_cc_blocks(ConfigWithoutNode2, 3),
+    ct:log("CC blocks #2: ~p", [Blocks2]),
+
+    %% Node2 "comes online" and we produce 3 more blocks
+    start_node(?NODE2, Config),
+    {ok, Blocks3} = produce_cc_blocks(Config, 3),
+    ct:log("CC blocks #3: ~p", [Blocks3]),
+
+    %% Mine 3 microblocks, skip SkipNode'th turn
+    %% {ok, _KB3} = produce_cc_blocks(Config, 3),
+    %% Blocking a producer and waiting enough blocks will 100% guarantee that there is a timeout in production
+    %% TODO: Producing with a node stopped will most likely crash the produce (notimpl)
+    % MineFn = fun(Node) ->
+        %% Create a spend transaction to include in the microblock
+%%        SpendTx = consensus_test_create_spend_tx(Node, ?ALICE, ?BOB, 1000),
+
+        %% Push the transaction to the mempool
+        %% XXX Not pushing will not create microblocks!
+        % ok = rpc(Node, aec_tx_pool, push, [SpendTx]),
+
+        %% Ensure the microblock is created and written?
+        % true = aec_events:subscribe(micro_block_created),
+
+        %% Verify the microblock
+        % ?assert(aec_blocks:is_micro_block(MicroBlock)),
+        % ?assertEqual(InitialHeight, aec_blocks:height(MicroBlock))
+    % end,
+
+    %% Do not mine on Leader 1
+    %%    MineFn(L2),
+    %%    MineFn(L3),
+
+    %% Verify that the final chain state is consistent on each of the nodes
+    % VerifyFn = fun(Node) ->
+    %     TopBlock = rpc(Node, aec_chain, top_block, []),
+    %     ?assertEqual(InitialHeight, aec_blocks:height(TopBlock)),
+    %     ?assert(aec_blocks:is_key_block(KeyBlock)),
+    %     ?assert(aec_blocks:is_micro_block(TopBlock))
+    %% TODO: verify no forks
+    % end,
+    % lists:foreach(VerifyFn, [?NODE1, ?NODE2, ?NODE3]),
+
+    %% Config contains triples {Node, NodeName, Stakeholders}
+    lists:foreach(fun inspect/1, Nodes),
+    ok.
+
+stop_and_check(Nodes, Config) ->
+    lists:foreach( fun(N) -> aecore_suite_utils:stop_node(N, Config) end, Nodes),
+    ok = aecore_suite_utils:check_for_logs(Nodes, Config).
+
+start_node(Node, Config) ->
+    aecore_suite_utils:start_node(Node, Config),
+    aecore_suite_utils:connect(aecore_suite_utils:node_name(Node)),
+    ok = aecore_suite_utils:check_for_logs([Node], Config),
+    ok.
