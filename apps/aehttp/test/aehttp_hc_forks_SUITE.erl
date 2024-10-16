@@ -26,8 +26,10 @@
 -export([
     start_two_child_nodes/1,
     produce_first_epoch/1,
-    produce_1_cc_block/1,
-    spend_txs_late_mining/1
+    produce_1_cc_block/1, produce_1_cc_block_late/1, produce_3_cc_blocks/1,
+    spend_txs_late_mining/1,
+    verify_consensus_solution_late_block/1,
+    verify_consensus_solution_netsplit/1
 ]).
 
 -include_lib("stdlib/include/assert.hrl").
@@ -130,16 +132,15 @@
 }).
 %% ak_2CPHnpGxYw3T7XdUybxKDFGwtFQY7E5o3wJzbexkzSQ2BQ7caJ
 
--define(GENESIS_BENFICIARY,
-    <<0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0>>
-).
+% -define(GENESIS_BENEFICIARY,
+%     <<0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0>>
+% ).
 
 all() ->
     [
-        {group, group_mining}
+        {group, group_mining},
         % {group, group_gossip},
-        % {group, group_netsplit},
+        {group, group_netsplit}
         % {group, group_netsplit_eoe}
     ].
 
@@ -151,8 +152,10 @@ groups() ->
             start_two_child_nodes,
             produce_first_epoch,
             produce_1_cc_block,
-            spend_txs_late_mining
-        ]}
+            spend_txs_late_mining,
+            produce_1_cc_block_late,
+            verify_consensus_solution_late_block
+        ]},
         % {group_gossip, [sequence], [
         %     %% Blocks gossiped late
         %     %% Make sure that the current leader does not make it into the time slot
@@ -160,11 +163,15 @@ groups() ->
         %     produce_first_epoch,
         %     delay_leader_gossip
         % ]}
-        % {group_netsplit, [sequence], [
-        %     %% Create a network split in the middle of a block
-        %     start_two_child_nodes,
-        %     produce_first_epoch
-        % ]},
+        {group_netsplit, [sequence], [
+            %% Create a network split in the middle of a block
+            start_two_child_nodes,
+            produce_first_epoch,
+            start_netsplit,
+            produce_3_cc_blocks,
+            finish_netsplit,
+            verify_consensus_solution_netsplit
+        ]}
         % {group_netsplit_eoe, [sequence], [
         %     %% Create a network split in the end of an epoch
         %     start_two_child_nodes,
@@ -172,10 +179,33 @@ groups() ->
         % ]}
     ].
 
-% Malicious nodes
-% Producing multiple blocks in a time slot is not allowed (also not producing)
-% Penalties
-% Recovery of a halted chain by the owner, when all other stakers go offline. The owner should have a registered producing contract with at least 1 token, and it will be automatically added to the producer schedule by the hyperchain controlling contract when all other stakers are not available/offline, to allow the owner to unstuck the chain and add the required changes.
+%% Test suite TO DO:
+%%
+%% Malicious (and disfunctional) nodes
+%% - Disappearing leader
+%% - 51% attack?
+%% - Producing multiple blocks in a time slot is not allowed
+%%
+%% Chain Attacks and Penalties
+%%
+%% Which activities are to be detected and penalized? Ignore cases which should be detected by the gossiping protocol.
+%% - Double spending: Attempting to spend the same funds multiple times
+%% - Sybil attack: Creating multiple fake identities to gain disproportionate influence
+%%   - Allowed in PoS (or does the random node distribution math say otherwise? TODO: the math)
+%% - Eclipse attack: Isolating a node from the rest of the network
+%%   - No penalty, should be resolved by the consensus protocol
+%% - Long-range attack: Rewriting a long history of the blockchain
+%% - Spam transactions: Flooding the network with useless transactions
+%%   - There's a cost to posting a txn?]
+%% - Invalid block propagation: Spreading blocks that don't follow consensus rules
+%%   - Gossiping and consensus protocol should prevent this?
+%% - Timejacking: Manipulating a node's time to affect block acceptance
+%%   - There should be some sort of time and timeslot verification in the gossiping and consensus protocol
+%% - Txn manipulation (address substitution)
+%% - Routing attacks: Bad actors can intercept data over the group of network nodes, preventing the chain from reaching consensus.
+%%
+%% Halting
+%% - The chain will stop when there aren't enough online nodes to serve as producers
 
 suite() -> [].
 
@@ -411,9 +441,32 @@ contract_call_spec(ContractPubkey, Src, Fun, Args, Amount, From, Nonce) ->
         },
     Spec.
 
-%% Produce 1 block, sync the child chain
+start_netsplit(Config) ->
+    ok.
+
+finish_netsplit(Config) ->
+    ok.
+
+verify_consensus_solution_netsplit(Config) ->
+    %% TODO: verify that the chain split is detected and the correct chain is continued
+    %% TODO: Check with the whitepaper the correct behaviour
+    ok.
+
+%% Test step: Produce 1 block in the child chain, sync nodes
 produce_1_cc_block(Config) ->
-    {ok, _KBs} = produce_cc_blocks(Config, 1),
+    {ok, _KBs} = produce_cc_blocks(Config, 1, undefined),
+    {ok, _KB} = wait_same_top([Node || {Node, _, _} <- ?config(nodes, Config)]),
+    ok.
+
+%% Test step: Produce 3 blocks in the child chain, sync nodes
+produce_3_cc_blocks(Config) ->
+    {ok, _KBs} = produce_cc_blocks(Config, 1, undefined),
+    {ok, _KB} = wait_same_top([Node || {Node, _, _} <- ?config(nodes, Config)]),
+    ok.
+
+%% Test step: Produce 1 block, but late out of their time slot, sync the child chain
+produce_1_cc_block_late(Config) ->
+    {ok, _KBs} = produce_cc_blocks(Config, 1, late_mining),
     {ok, _KB} = wait_same_top([Node || {Node, _, _} <- ?config(nodes, Config)]),
     ok.
 
@@ -476,7 +529,7 @@ produce_first_epoch(Config) ->
 produce_n_epochs(Config, N) ->
     [{Node1, _, _} | _] = ?config(nodes, Config),
     %% produce blocks
-    {ok, Bs} = produce_cc_blocks(Config, N * ?CHILD_EPOCH_LENGTH),
+    {ok, Bs} = produce_cc_blocks(Config, N * ?CHILD_EPOCH_LENGTH, undefined),
     %% check producers
     Producers = [aec_blocks:miner(B) || B <- Bs],
     ChildTopHeight = rpc(Node1, aec_chain, top_height, []),
@@ -533,7 +586,13 @@ do_contract_call_(CtPubkey, CtSrc, Fun, Args, Who, TopHash) ->
     {ok, Call} = dry_run(TopHash, Tx),
     decode_consensus_result(Call, Fun, CtSrc).
 
-%%% --------- helper functions
+verify_consensus_solution_late_block(Config) ->
+    %% TODO: verify that the late block is not accepted and some other leader stepped in
+    ok.
+
+%%%--------------------------------------------------------------------
+%%% Helper functions
+%%%--------------------------------------------------------------------
 
 contract_call(ContractPubkey, Src, Fun, Args, Amount, From) ->
     %% no contract calls support for parent chain
@@ -963,7 +1022,7 @@ election_contract_address() ->
 
 %% Increase the child chain with a number of key blocks. Automatically add key blocks on parent chain and
 %% if there are Txs, put them in a micro block.
-%% Flavour parameter is used to request special behaviour:
+%% SpecialBehaviour parameter is used to change the mining behaviour:
 %% - undefined: mine blocks normally
 %% - late_mining: mine blocks on the child chain after the time slot has expired
 -type ct_config() :: proplists:proplist().
@@ -1015,6 +1074,12 @@ produce_cc_blocks_(Config, BlocksCnt, ParentProduce, SpecialBehaviour) ->
     ?assertEqual(stopped, rpc:call(?PARENT_CHAIN_NODE_NAME, aec_conductor, get_mining_state, [])),
     ct:log("parent produce ~p", [ParentProduce]),
 
+    case SpecialBehaviour of
+        undefined -> ok;
+        late_mining ->
+            ct:log("Mining ~p blocks 3s late", []),
+            timer:sleep(3_000)
+    end,
     NewTopHeight = produce_to_cc_height(Config, TopHeight, TopHeight + BlocksCnt, ParentProduce),
     wait_same_top([Node || {Node, _, _} <- ?config(nodes, Config)]),
     get_generations(Node1, TopHeight + 1, NewTopHeight).
