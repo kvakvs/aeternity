@@ -27,7 +27,7 @@
     start_two_child_nodes/1,
     produce_first_epoch/1,
     produce_1_cc_block/1, produce_1_cc_block_late/1, produce_3_cc_blocks/1,
-    spend_txs_late_mining/1,
+    spend_txs_late_producing/1,
     verify_consensus_solution_late_block/1,
     verify_consensus_solution_netsplit/1
 ]).
@@ -138,32 +138,42 @@
 
 all() ->
     [
-        {group, group_mining},
-        % {group, group_gossip},
-        {group, group_netsplit}
-        % {group, group_netsplit_eoe}
+        {group, late_producing},
+        {group, producing_two_sequential_blocks},
+        {group, producing_a_fork},
+        {group, netsplit},
+        {group, combinatoric_explosion},
+        {group, eoe_netsplit},
+        {group, eoe_double_vote},
+        {group, eoe_inactive_producer},
+        {group, eoe_ignored_vote},
+        {group, eoe_finalizing_txn},
+        {group, bad_block}
     ].
 
 groups() ->
     [
-        {group_mining, [sequence], [
+        {late_producing, [sequence], [
             %% A block mined late by the leader
             %% Make sure that the current leader does not mine within the time slot
             start_two_child_nodes,
             produce_first_epoch,
             produce_1_cc_block,
-            spend_txs_late_mining,
+            spend_txs_late_producing,
             produce_1_cc_block_late,
             verify_consensus_solution_late_block
         ]},
-        % {group_gossip, [sequence], [
-        %     %% Blocks gossiped late
-        %     %% Make sure that the current leader does not make it into the time slot
-        %     start_two_child_nodes,
-        %     produce_first_epoch,
-        %     delay_leader_gossip
-        % ]}
-        {group_netsplit, [sequence], [
+        {producing_two_sequential_blocks, [sequence], [
+            %% Mining two valid consecutive blocks should be rejected (because leader is only at a specific height)
+            start_two_child_nodes,
+            produce_first_epoch
+            %%
+        ]},
+        {producing_a_fork, [sequence], [
+            %% - Two (key) blocks at the same height signed by the same producer
+            %% Same as double_mining - do we penalize or ignore?
+        ]},
+        {netsplit, [sequence], [
             %% Create a network split in the middle of a block
             start_two_child_nodes,
             produce_first_epoch,
@@ -171,15 +181,43 @@ groups() ->
             produce_3_cc_blocks,
             finish_netsplit,
             verify_consensus_solution_netsplit
+        ]},
+        {combinatoric_explosion, [sequence], [
+            %% Worst case scenario when each validator creates a fork on every block, making it V^B count of forks
+        ]},
+        {eoe_netsplit, [sequence], [
+            %% Create a network split in the end of an epoch (triple length block)
+            %% Losing a vote, attempt to penalize a vote and how it is resolved when the netsplit is over, will the penalty be lifted
+        ]},
+        {eoe_double_vote, [sequence], [
+            %% - Ongoing vote can become corrupted/missing votes
+            %% - Double vote: two or more voting txns by the same validator on two different forks
+            %%      - Reports on the malicious behaviour
+            %%      - There should be a penalty (still in discussion)
+        ]},
+        {eoe_inactive_producer, [sequence], [
+            %% - The final producer is not active/does not send the proposal
+            %%      - on timeout: the new leader just runs with the preferred fork
+            %%      - if the vote fails: ...
+        ]},
+        {eoe_ignored_vote, [sequence], [
+            %% - Ignoring votes?
+        ]},
+        {eoe_finalizing_txn, [sequence], [
+            %% - Ensure that finalizing txn is created on the chain
+            %%      - The final decision should include all votes
+            start_two_child_nodes,
+            produce_first_epoch
+        ]},
+        {bad_block, [sequence], [
+            %% - Producing a bad block that does not pass the checks
+            %% What are the things we're checking for in the block?
+            %% Block can have timestamp not before previous. And height.
+            %% Block can be received (gossiped) only within its time window
         ]}
-        % {group_netsplit_eoe, [sequence], [
-        %     %% Create a network split in the end of an epoch
-        %     start_two_child_nodes,
-        %     produce_first_epoch
-        % ]}
-    ].
+].
 
-%% Test suite TO DO:
+%% Test suite TO DO:x
 %%
 %% Malicious (and disfunctional) nodes
 %% - Disappearing leader
@@ -206,7 +244,19 @@ groups() ->
 %%
 %% Halting
 %% - The chain will stop when there aren't enough online nodes to serve as producers
-
+%%
+%% To Implement:
+%% - TODO: A way to configure the gossip connections so that the test will have a guaranteeed initial setup
+%% - Sync connections?
+%% - IMPORTANT: When testing always assume all nodes are on the same height (apart from the last blocks might be different or empty?)
+%%
+%% Penalizable Offences
+%% - Two (key) blocks at the same height signed by the same producer
+%% - Double voting (two different votes in the voting process), double proposal, double anything else
+%% - [explanation?] Attesting to a block that surrounds another one (changing the history)?
+%% - Missing vote (even if offline)
+%% - Producing a bad block that does not pass the checks
+%%
 suite() -> [].
 
 init_per_suite(Config0) ->
@@ -442,14 +492,19 @@ contract_call_spec(ContractPubkey, Src, Fun, Args, Amount, From, Nonce) ->
     Spec.
 
 start_netsplit(Config) ->
+    %% Use aec_peers:block_peer and maybe need to disconnect?
+    %% See if the block is not propagated to other nodes, and is strictly local. It is currently propagated via gproc
     ok.
 
 finish_netsplit(Config) ->
+    %% Use aec_peers:unblock_peer
     ok.
 
 verify_consensus_solution_netsplit(Config) ->
     %% TODO: verify that the chain split is detected and the correct chain is continued
     %% TODO: Check with the whitepaper the correct behaviour
+    %% Use aec_chain to read last block and check if it is the correct one
+    %% Some of the elected leaders will be in the other split, so there will be empty blocks
     ok.
 
 %% Test step: Produce 1 block in the child chain, sync nodes
@@ -466,14 +521,14 @@ produce_3_cc_blocks(Config) ->
 
 %% Test step: Produce 1 block, but late out of their time slot, sync the child chain
 produce_1_cc_block_late(Config) ->
-    {ok, _KBs} = produce_cc_blocks(Config, 1, late_mining),
+    {ok, _KBs} = produce_cc_blocks(Config, 1, late_producing),
     {ok, _KB} = wait_same_top([Node || {Node, _, _} <- ?config(nodes, Config)]),
     ok.
 
 %% Add one transaction to create a micro block
 %% The current leader is requested to mine late outside of their time slot
 %% The expected result: The late block is not accepted, and the other leader has produced one
-spend_txs_late_mining(Config) ->
+spend_txs_late_producing(Config) ->
     Top0 = rpc(?NODE1, aec_chain, top_header, []),
     ct:log("Top before posting spend txs: ~p", [aec_headers:height(Top0)]),
     NetworkId = ?config(network_id, Config),
@@ -482,7 +537,7 @@ spend_txs_late_mining(Config) ->
     % seed_account(pubkey(?BOB), 100000002 * ?DEFAULT_GAS_PRICE, NetworkId),
     % seed_account(pubkey(?LISA), 100000003 * ?DEFAULT_GAS_PRICE, NetworkId),
 
-    produce_cc_blocks(Config, 1, late_mining),
+    produce_cc_blocks(Config, 1, late_producing),
     {ok, []} = rpc:call(?NODE1_NAME, aec_tx_pool, peek, [infinity]),
     %% TODO check that the actors got their share
     ok.
@@ -588,6 +643,7 @@ do_contract_call_(CtPubkey, CtSrc, Fun, Args, Who, TopHash) ->
 
 verify_consensus_solution_late_block(Config) ->
     %% TODO: verify that the late block is not accepted and some other leader stepped in
+    %% Use aec_chain to read
     ok.
 
 %%%--------------------------------------------------------------------
@@ -1024,9 +1080,9 @@ election_contract_address() ->
 %% if there are Txs, put them in a micro block.
 %% SpecialBehaviour parameter is used to change the mining behaviour:
 %% - undefined: mine blocks normally
-%% - late_mining: mine blocks on the child chain after the time slot has expired
+%% - late_producing: mine blocks on the child chain after the time slot has expired
 -type ct_config() :: proplists:proplist().
--type produce_special_behaviour() :: undefined | late_mining.
+-type produce_special_behaviour() :: undefined | late_producing.
 -spec produce_cc_blocks(
     Config :: ct_config(),
     BlocksCnt :: pos_integer(),
@@ -1076,9 +1132,9 @@ produce_cc_blocks_(Config, BlocksCnt, ParentProduce, SpecialBehaviour) ->
 
     case SpecialBehaviour of
         undefined -> ok;
-        late_mining ->
+        late_producing ->
             ct:log("Mining ~p blocks 3s late", []),
-            timer:sleep(3_000)
+            % TODO: Set aeu_ets_cache:put on the remote node to make the child chain mine 3s later
     end,
     NewTopHeight = produce_to_cc_height(Config, TopHeight, TopHeight + BlocksCnt, ParentProduce),
     wait_same_top([Node || {Node, _, _} <- ?config(nodes, Config)]),
