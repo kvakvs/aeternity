@@ -1,31 +1,24 @@
 -module(hctest_forks_SUITE).
 
-% -import(aecore_suite_utils, [
-%     http_request/4,
-%     external_address/0,
-%     rpc/3,
-%     rpc/4
-% ]).
-
--export(
-    [
-        all/0,
-        groups/0,
-        suite/0,
-        init_per_suite/1,
-        end_per_suite/1,
-        init_per_group/2,
-        end_per_group/2,
-        init_per_testcase/2,
-        end_per_testcase/2
-    ]
-).
+-export([
+    all/0,
+    groups/0,
+    suite/0,
+    init_per_suite/1,
+    end_per_suite/1,
+    init_per_group/2,
+    end_per_group/2,
+    init_per_testcase/2,
+    end_per_testcase/2
+]).
 
 %% Test cases
 -export([
     start_two_child_nodes/1,
     produce_first_epoch/1,
-    produce_1_cc_block/1, produce_1_cc_block_late/1, produce_3_cc_blocks/1,
+    produce_1_cc_block/1,
+    produce_1_cc_block_late/1,
+    produce_3_cc_blocks/1,
     spend_txs_late_producing/1,
     verify_consensus_solution_late_block/1,
     verify_consensus_solution_netsplit/1
@@ -71,7 +64,7 @@ groups() ->
         {combinatoric_explosion, [sequence], [
             %% Worst case scenario when each validator creates a fork on every block, making it V^B count of forks
         ]}
-].
+    ].
 
 %% Test suite TO DO:x
 %%
@@ -256,7 +249,9 @@ produce_n_epochs(Config, N) ->
     ok.
 
 leaders_at_height(Node, Height, Config) ->
-    {ok, Hash} = aecore_suite_utils:rpc(Node, aec_chain_state, get_key_block_hash_at_height, [Height]),
+    {ok, Hash} = aecore_suite_utils:rpc(Node, aec_chain_state, get_key_block_hash_at_height, [
+        Height
+    ]),
     {ok, Return} = inspect_staking_contract(?ALICE, leaders, Config, Hash),
     [
         begin
@@ -280,7 +275,12 @@ inspect_staking_contract(OriginWho, WhatToInspect, Config, TopHash) ->
         end,
     ContractPubkey = ?config(staking_contract, Config),
     do_contract_call(
-        ContractPubkey, hctest_utils:src(?MAIN_STAKING_CONTRACT, Config), Fun, Args, OriginWho, TopHash
+        ContractPubkey,
+        hctest_utils:src(?MAIN_STAKING_CONTRACT, Config),
+        Fun,
+        Args,
+        OriginWho,
+        TopHash
     ).
 
 do_contract_call(CtPubkey, CtSrc, Fun, Args, Who, TopHash) ->
@@ -315,7 +315,9 @@ elected_leader_did_not_show_up_(Config) ->
     %% stop the block producer
     aecore_suite_utils:stop_node(?NODE1, Config),
     TopHeader0 = aecore_suite_utils:rpc(?NODE2, aec_chain, top_header, []),
-    {TopHeader0, TopHeader0} = {aecore_suite_utils:rpc(?NODE3, aec_chain, top_header, []), TopHeader0},
+    {TopHeader0, TopHeader0} = {
+        aecore_suite_utils:rpc(?NODE3, aec_chain, top_header, []), TopHeader0
+    },
     ct:log("Starting test at (child chain): ~p", [TopHeader0]),
     %% produce a block on the parent chain
     hctest_utils:produce_cc_blocks(Config, 1),

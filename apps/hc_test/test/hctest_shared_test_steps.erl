@@ -128,4 +128,3 @@ end_per_group(Config) ->
      || {Node, _, _} <- proplists:get_value(nodes, Config1, [])
     ],
     Config1.
-

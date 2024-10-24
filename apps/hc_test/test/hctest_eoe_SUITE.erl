@@ -1,9 +1,21 @@
--module(hctest_endofepoch_SUITE).
+-module(hctest_eoe_SUITE).
 
 -include_lib("common_test/include/ct.hrl").
 
 -include("../../aecontract/include/hard_forks.hrl").
 -include("../include/hc_test.hrl").
+
+-export([
+    all/0,
+    groups/0,
+    suite/0,
+    init_per_suite/1,
+    end_per_suite/1,
+    init_per_group/2,
+    end_per_group/2,
+    init_per_testcase/2,
+    end_per_testcase/2
+]).
 
 groups() ->
     [
@@ -31,4 +43,4 @@ groups() ->
             start_two_child_nodes,
             produce_first_epoch
         ]}
-].
+    ].

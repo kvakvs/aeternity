@@ -9,13 +9,6 @@
 
 -export([child_node_config/3, produce_cc_blocks/2, mine_cc_blocks/2, get_generations/3, get_block_producer_name/2]).
 
-% -import(aecore_suite_utils, [
-%     http_request/4,
-%     external_address/0,
-%     rpc/3,
-%     rpc/4
-% ]).
-
 %% Retrieves configuration values from saved_config for specified keys and merges them into CT Config
 with_saved_keys(Keys, Config) ->
     {_TC, SavedConfig} = ?config(saved_config, Config),
